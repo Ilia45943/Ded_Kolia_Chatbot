@@ -4,7 +4,7 @@ import sqlite3
 import requests
 import re
 from datetime import datetime
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -21,19 +21,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-PORT = 10000  # Явно указываем порт 10000
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+# Конфигурация - используем os.getenv() с явными значениями по умолчанию
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+PORT = int(os.environ.get('PORT', 10000))  # Render автоматически устанавливает PORT
 MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
 
 # Инициализация Flask
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
 # ====================== БАЗА ЗНАНИЙ ======================
 class KnowledgeBase:
-    def __init__(self, db_path="/tmp/knowledge.db"):
+    def __init__(self, db_path=":memory:"):  # Используем in-memory базу для простоты
         self.db_path = db_path
         self._init_db()
     
@@ -48,7 +48,6 @@ class KnowledgeBase:
                     timestamp TEXT NOT NULL
                 )
             """)
-            conn.commit()
     
     def add_user_fact(self, user_id, fact, value):
         with sqlite3.connect(self.db_path) as conn:
@@ -56,7 +55,6 @@ class KnowledgeBase:
                 INSERT INTO user_facts (user_id, fact, value, timestamp)
                 VALUES (?, ?, ?, ?)
             """, (user_id, fact, value, datetime.now().isoformat()))
-            conn.commit()
     
     def get_user_facts(self, user_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -67,7 +65,7 @@ class KnowledgeBase:
 
 # ====================== ПАМЯТЬ ДИАЛОГОВ ======================
 class Memory:
-    def __init__(self, db_path="/tmp/sessions.db"):
+    def __init__(self, db_path=":memory:"):
         self.db_path = db_path
         self._init_db()
     
@@ -82,7 +80,6 @@ class Memory:
                     bot_response TEXT
                 )
             """)
-            conn.commit()
     
     def get_history(self, user_id, limit=3):
         with sqlite3.connect(self.db_path) as conn:
@@ -98,14 +95,12 @@ class Memory:
                 INSERT INTO sessions (user_id, timestamp, user_message, bot_response)
                 VALUES (?, ?, ?, ?)
             """, (user_id, datetime.now().isoformat(), user_message, bot_response))
-            conn.commit()
 
 # ====================== ЛОГИКА ДЕДА КОЛИ ======================
 class DedKolia:
     def __init__(self, knowledge_base, memory):
         self.kb = knowledge_base
         self.memory = memory
-        self.model = "deepseek/deepseek-r1:free"
     
     def _extract_facts(self, user_id, text):
         patterns = {
@@ -156,7 +151,7 @@ class DedKolia:
             "X-Title": "Дед Коля Бот"
         }
         payload = {
-            "model": self.model,
+            "model": "deepseek/deepseek-r1:free",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message}
@@ -176,7 +171,7 @@ class DedKolia:
             logger.error(f"Request failed: {str(e)}")
             return "Чёрт, сломалось! Давай ещё раз попробуем."
 
-# Инициализация
+# Инициализация систем
 knowledge_base = KnowledgeBase()
 memory = Memory()
 ded_kolia = DedKolia(knowledge_base, memory)
@@ -203,53 +198,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response)
 
 # Flask роуты
-@flask_app.route('/')
+@app.route('/')
 def home():
     return f"🤖 Дед Коля в работе! Модель: {MODEL_NAME}"
 
-@flask_app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
     try:
-        bot = Bot(TOKEN)
-        url = f"{WEBHOOK_URL}/telegram_webhook"
-        await bot.set_webhook(url)
-        return jsonify({"status": "success", "message": f"Webhook set to {url}"}), 200
+        # Создаем приложение Telegram
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Регистрируем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("remember", remember_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Устанавливаем вебхук
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url
+        )
+        
+        return jsonify({"status": "success", "message": f"Webhook set to {webhook_url}"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@flask_app.route('/telegram_webhook', methods=['POST'])
+@app.route('/telegram_webhook', methods=['POST'])
 async def telegram_webhook():
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("remember", remember_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
     try:
+        # Создаем приложение Telegram
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Регистрируем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("remember", remember_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Обрабатываем обновление
         await application.initialize()
         update = Update.de_json(request.json, application.bot)
         await application.process_update(update)
+        
         return '', 200
     except Exception as e:
         logger.error(f"Error processing update: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-if __name__ == '__main__':
-    # Детальная диагностика переменных
-    logger.info("="*50)
-    logger.info("Проверка переменных окружения:")
-    logger.info(f"TELEGRAM_TOKEN: {'УСТАНОВЛЕН' if TOKEN else 'ОТСУТСТВУЕТ'}")
-    logger.info(f"OPENROUTER_API_KEY: {'УСТАНОВЛЕН' if OPENROUTER_API_KEY else 'ОТСУТСТВУЕТ'}")
-    logger.info(f"WEBHOOK_URL: {'УСТАНОВЛЕН' if WEBHOOK_URL else 'ОТСУТСТВУЕТ'}")
-    logger.info(f"PORT: {PORT} (фиксированный)")
-    logger.info("="*50)
+def main():
+    # Проверка обязательных переменных
+    required_vars = [
+        ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+        ('OPENROUTER_API_KEY', OPENROUTER_API_KEY),
+        ('WEBHOOK_URL', WEBHOOK_URL)
+    ]
     
-    if not TOKEN or not OPENROUTER_API_KEY or not WEBHOOK_URL:
-        logger.error("ОШИБКА: Отсутствуют обязательные переменные окружения!")
-        logger.error("Убедитесь, что в настройках Render добавлены:")
-        logger.error("1. TELEGRAM_TOKEN")
-        logger.error("2. OPENROUTER_API_KEY")
-        logger.error("3. WEBHOOK_URL")
+    missing = [name for name, value in required_vars if not value]
+    
+    if missing:
+        logger.error(f"ОШИБКА: Отсутствуют обязательные переменные: {', '.join(missing)}")
+        logger.error("Пожалуйста, установите их в настройках Render")
         exit(1)
     
-    logger.info(f"🚀 Запуск бота на порту {PORT} с моделью: {MODEL_NAME}...")
-    flask_app.run(host='0.0.0.0', port=PORT)
+    logger.info("="*50)
+    logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
+    logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
+    logger.info(f"WEBHOOK_URL: {'установлен' if WEBHOOK_URL else 'отсутствует'}")
+    logger.info(f"PORT: {PORT}")
+    logger.info("="*50)
+    
+    logger.info(f"🚀 Запуск бота с моделью {MODEL_NAME} на порту {PORT}...")
+    app.run(host='0.0.0.0', port=PORT)
+
+if __name__ == '__main__':
+    main()

@@ -1,28 +1,19 @@
-from flask import Flask, request, jsonify, render_template
+import os
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from brain.memory import Memory
 from brain.personality import Personality
-import os
-
-app = Flask(__name__)
-app.config['DATABASE'] = 'db/sessions.db'
 
 # Инициализация
-memory = Memory(app.config['DATABASE'])
+memory = Memory('db/sessions.db')
 persona = Personality()
+TOKEN = os.getenv('TELEGRAM_TOKEN')  # Добавишь в настройках Render
 
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-@app.route('/chat', methods=['POST'])
-def chat():
-    user_id = request.json.get('user_id', 'default')
-    user_input = request.json.get('message', '').strip()
+async def handle_message(update: Update, context):
+    user_id = str(update.message.from_user.id)
+    user_input = update.message.text
     
-    if not user_input:
-        return jsonify({"error": "Пустое сообщение"}), 400
-    
-    # Получаем историю и состояние
+    # Получаем историю и настроение
     history = memory.get_history(user_id)
     mood = memory.get_mood(user_id)
     
@@ -33,18 +24,14 @@ def chat():
         current_mood=mood
     )
     
-    # Сохраняем в память
-    memory.save_interaction(
-        user_id=user_id,
-        user_message=user_input,
-        bot_response=response,
-        mood=new_mood
-    )
-    
-    return jsonify({
-        "response": response,
-        "mood": new_mood
-    })
+    # Сохраняем и отправляем
+    memory.save_interaction(user_id, user_input, response, new_mood)
+    await update.message.reply_text(response)
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+    app.run_polling()  # Или вебхук (см. ниже)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    main()

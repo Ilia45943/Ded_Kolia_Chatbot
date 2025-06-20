@@ -3,17 +3,18 @@ import sqlite3
 import requests
 import random
 import re
+import threading
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters
-from flask import Flask
+from flask import Flask, request
 
 # ====================== КОНФИГУРАЦИЯ ======================
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 AI21_API_KEY = os.getenv('AI21_API_KEY')
 PORT = int(os.environ.get('PORT', 5000))  # Render сам назначает порт
 
-# Инициализация Flask app для Web Service
+# Инициализация Flask app
 flask_app = Flask(__name__)
 
 # ====================== БАЗА ЗНАНИЙ ДЕДА КОЛИ ======================
@@ -23,63 +24,74 @@ class KnowledgeBase:
         self._init_db()
     
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_facts (
-                    id INTEGER PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    fact TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS general_knowledge (
-                    id INTEGER PRIMARY KEY,
-                    topic TEXT NOT NULL,
-                    fact TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL
-                )
-            """)
-            conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_facts (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                fact TEXT NOT NULL,
+                value TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS general_knowledge (
+                id INTEGER PRIMARY KEY,
+                topic TEXT NOT NULL,
+                fact TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
     
     def add_user_fact(self, user_id, fact, value):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO user_facts (user_id, fact, value, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, fact, value, datetime.now().isoformat()))
-            conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_facts (user_id, fact, value, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, fact, value, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
     
     def get_user_facts(self, user_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT fact, value 
-                FROM user_facts 
-                WHERE user_id = ?
-                ORDER BY timestamp DESC
-            """, (user_id,))
-            return cursor.fetchall()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT fact, value 
+            FROM user_facts 
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+        """, (user_id,))
+        result = cursor.fetchall()
+        conn.close()
+        return result
     
     def add_general_knowledge(self, topic, fact):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO general_knowledge (topic, fact, timestamp)
-                VALUES (?, ?, ?)
-            """, (topic, fact, datetime.now().isoformat()))
-            conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO general_knowledge (topic, fact, timestamp)
+            VALUES (?, ?, ?)
+        """, (topic, fact, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
     
     def get_related_knowledge(self, topic):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT fact 
-                FROM general_knowledge 
-                WHERE topic LIKE ?
-                ORDER BY timestamp DESC
-                LIMIT 3
-            """, (f'%{topic}%',))
-            return [row[0] for row in cursor.fetchall()]
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT fact 
+            FROM general_knowledge 
+            WHERE topic LIKE ?
+            ORDER BY timestamp DESC
+            LIMIT 3
+        """, (f'%{topic}%',))
+        result = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return result
 
 # ====================== МОДУЛЬ ПАМЯТИ ======================
 class Memory:
@@ -88,56 +100,65 @@ class Memory:
         self._init_db()
     
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    user_message TEXT,
-                    bot_response TEXT,
-                    mood TEXT NOT NULL
-                )
-            """)
-            conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                user_message TEXT,
+                bot_response TEXT,
+                mood TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
     
     def get_history(self, user_id, limit=6):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT user_message, bot_response 
-                FROM sessions 
-                WHERE user_id = ? 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            """, (user_id, limit))
-            return cursor.fetchall()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_message, bot_response 
+            FROM sessions 
+            WHERE user_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        """, (user_id, limit))
+        result = cursor.fetchall()
+        conn.close()
+        return result
     
     def get_mood(self, user_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT mood 
-                FROM sessions 
-                WHERE user_id = ? 
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            """, (user_id,))
-            result = cursor.fetchone()
-            return result[0] if result else "neutral"
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT mood 
+            FROM sessions 
+            WHERE user_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """, (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else "neutral"
     
     def save_interaction(self, user_id, user_message, bot_response, mood):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO sessions 
-                (user_id, timestamp, user_message, bot_response, mood) 
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                user_id,
-                datetime.now().isoformat(),
-                user_message,
-                bot_response,
-                mood
-            ))
-            conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO sessions 
+            (user_id, timestamp, user_message, bot_response, mood) 
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            datetime.now().isoformat(),
+            user_message,
+            bot_response,
+            mood
+        ))
+        conn.commit()
+        conn.close()
 
 # ====================== ХАРАКТЕР ДЕДА КОЛИ ======================
 class Personality:
@@ -232,7 +253,7 @@ class Personality:
             if response.status_code == 200:
                 bot_response = response.json()['completions'][0]['data']['text']
             else:
-                bot_response = f"Ой, курва, API вернуло {response.status_code}! Попробуй ещё раз."
+                bot_response = f"Ой, курва, ошибка API! Код: {response.status_code}"
         except Exception as e:
             bot_response = f"Чёрт, сломалось: {str(e)}"
         
@@ -243,12 +264,12 @@ knowledge_base = KnowledgeBase()
 memory = Memory()
 persona = Personality(knowledge_base)
 
-# ====================== ЗАПУСК ТЕЛЕГРАМ БОТА ======================
+# ====================== ТЕЛЕГРАМ БОТ ======================
 def start_bot():
-    print("⚙️ Инициализация обучаемого бота Деда Коли...")
+    print("⚙️ Инициализация бота Деда Коли...")
     app = Application.builder().token(TOKEN).build()
     
-    # Регистрируем обработчики
+    # Регистрация обработчиков
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("remember", remember_command))
     app.add_handler(CommandHandler("teach", teach_command))
@@ -256,7 +277,7 @@ def start_bot():
     print("🤖 Бот запущен в режиме polling...")
     app.run_polling()
 
-# ====================== КОМАНДЫ ДЛЯ ОБУЧЕНИЯ ======================
+# Обработчики команд
 async def remember_command(update: Update, context):
     user_id = str(update.message.from_user.id)
     if not context.args:
@@ -277,7 +298,7 @@ async def teach_command(update: Update, context):
     knowledge_base.add_general_knowledge(topic, fact)
     await update.message.reply_text(f"Записал в базу знаний: {topic} - {fact}")
 
-# ====================== ОБРАБОТЧИК СООБЩЕНИЙ ======================
+# Обработчик сообщений
 async def handle_message(update: Update, context):
     user_id = str(update.message.from_user.id)
     user_input = update.message.text
@@ -295,19 +316,20 @@ async def handle_message(update: Update, context):
     memory.save_interaction(user_id, user_input, response, new_mood)
     await update.message.reply_text(response)
 
-# ====================== FLASK РОУТ ДЛЯ RENDER ======================
+# ====================== FLASK РОУТЫ ======================
 @flask_app.route('/')
 def home():
     return "Дед Коля в работе! Бот запущен и работает."
 
-# ====================== ЗАПУСК ВСЕЙ СИСТЕМЫ ======================
+@flask_app.route('/health')
+def health_check():
+    return "OK", 200
+
+# ====================== ЗАПУСК ПРИЛОЖЕНИЯ ======================
 if __name__ == '__main__':
-    import threading
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=start_bot)
-    bot_thread.daemon = True
+    # Запускаем бот в отдельном потоке
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
     
-    # Запускаем Flask сервер в главном потоке
+    # Запускаем Flask сервер
     flask_app.run(host='0.0.0.0', port=PORT)

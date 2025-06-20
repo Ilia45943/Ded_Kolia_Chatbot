@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-PORT = int(os.environ.get('PORT', 5000))
+PORT = 10000  # Явно указываем порт 10000
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"  # Название без указания "бесплатная"
+MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
 
 # Инициализация Flask
 flask_app = Flask(__name__)
@@ -84,12 +84,7 @@ class Memory:
             """)
             conn.commit()
     
-    # ПОЯСНЕНИЕ: limit=3 означает что мы берём 3 последних взаимодействия
     def get_history(self, user_id, limit=3):
-        """
-        Получает историю диалога для конкретного пользователя
-        limit=3 - берём только 3 последних обмена (пользователь->бот)
-        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
                 SELECT user_message, bot_response FROM sessions 
@@ -131,7 +126,6 @@ class DedKolia:
         if fact_response:
             return fact_response
         
-        # ПОЯСНЕНИЕ: здесь используется limit=3
         history = self.memory.get_history(user_id)
         context = "\n".join(
             f"User: {msg[0]}\nДед Коля: {msg[1]}" 
@@ -189,7 +183,6 @@ ded_kolia = DedKolia(knowledge_base, memory)
 
 # Telegram обработчики
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Убрано упоминание "бесплатная"
     await update.message.reply_text(f"👴 Дед Коля на связи! Используем модель: {MODEL_NAME}\nШо надо?")
 
 async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,9 +234,22 @@ async def telegram_webhook():
         return jsonify({"status": "error"}), 500
 
 if __name__ == '__main__':
+    # Детальная диагностика переменных
+    logger.info("="*50)
+    logger.info("Проверка переменных окружения:")
+    logger.info(f"TELEGRAM_TOKEN: {'УСТАНОВЛЕН' if TOKEN else 'ОТСУТСТВУЕТ'}")
+    logger.info(f"OPENROUTER_API_KEY: {'УСТАНОВЛЕН' if OPENROUTER_API_KEY else 'ОТСУТСТВУЕТ'}")
+    logger.info(f"WEBHOOK_URL: {'УСТАНОВЛЕН' if WEBHOOK_URL else 'ОТСУТСТВУЕТ'}")
+    logger.info(f"PORT: {PORT} (фиксированный)")
+    logger.info("="*50)
+    
     if not TOKEN or not OPENROUTER_API_KEY or not WEBHOOK_URL:
-        logger.error("Missing environment variables!")
+        logger.error("ОШИБКА: Отсутствуют обязательные переменные окружения!")
+        logger.error("Убедитесь, что в настройках Render добавлены:")
+        logger.error("1. TELEGRAM_TOKEN")
+        logger.error("2. OPENROUTER_API_KEY")
+        logger.error("3. WEBHOOK_URL")
         exit(1)
     
-    logger.info(f"🚀 Starting bot with {MODEL_NAME}...")
+    logger.info(f"🚀 Запуск бота на порту {PORT} с моделью: {MODEL_NAME}...")
     flask_app.run(host='0.0.0.0', port=PORT)

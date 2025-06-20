@@ -108,8 +108,7 @@ class Memory:
                 LIMIT ?
             """, (user_id, limit))
 return cursor.fetchall()
-    
-    def get_mood(self, user_id):
+     def get_mood(self, user_id):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
                 SELECT mood 
@@ -120,8 +119,7 @@ return cursor.fetchall()
             """, (user_id,))
             result = cursor.fetchone()
             return result[0] if result else "neutral"
-    
-    def save_interaction(self, user_id, user_message, bot_response, mood):
+     def save_interaction(self, user_id, user_message, bot_response, mood):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT INTO sessions 
@@ -157,14 +155,12 @@ class Personality:
         Контекст диалога:
         {context}
         """
-    
     def _determine_mood(self, user_input: str) -> str:
         triggers = {
             "happy": ["спасибо", "класс", "люблю", "хорош"],
             "angry": ["дурак", "идиот", "ненавижу", "скучно"]
         }
-        
-        input_lower = user_input.lower()
+         input_lower = user_input.lower()
         if any(word in input_lower for word in triggers["happy"]):
             return "happy"
         elif any(word in input_lower for word in triggers["angry"]):
@@ -181,17 +177,14 @@ class Personality:
             "работа": r"(я работаю|моя работа|профессия) ([а-яА-ЯёЁ\s]+)",
             "хобби": r"(мои хобби|увлекаюсь|люблю) ([а-яА-ЯёЁ\s\,]+)"
         }
-        
-        for fact_type, pattern in patterns.items():
+          for fact_type, pattern in patterns.items():
             match = re.search(pattern, user_input, re.IGNORECASE)
             if match:
                 value = match.group(2).strip()
                 self.kb.add_user_fact(user_id, fact_type, value)
                 return f"Окей, запомнил что твоё {fact_type} - {value}!"
-        
         return None
-
-    def generate_response(self, user_id, user_input: str, history: list, current_mood: str) -> tuple:
+   def generate_response(self, user_id, user_input: str, history: list, current_mood: str) -> tuple:
         # Пытаемся извлечь факты из сообщения
         learn_result = self._extract_and_save_facts(user_id, user_input)
         if learn_result:
@@ -252,18 +245,15 @@ async def remember_command(update: Update, context):
     if not context.args:
         await update.message.reply_text("Чё запоминать-то? Используй: /remember я люблю пиво")
         return
-    
-    fact_text = " ".join(context.args)
+     fact_text = " ".join(context.args)
     knowledge_base.add_user_fact(user_id, "факт", fact_text)
     await update.message.reply_text(f"Окей, курва, запомнил: {fact_text}")
-
 async def teach_command(update: Update, context):
     """Команда для обучения общим знаниям"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("Используй: /teach трактор 'Т-25 ездит на солярке'")
         return
-    
-    topic = context.args[0]
+        topic = context.args[0]
     fact = " ".join(context.args[1:])
     knowledge_base.add_general_knowledge(topic, fact)
     await update.message.reply_text(f"Записал в базу знаний: {topic} - {fact}")

@@ -6,10 +6,15 @@ import re
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters
+from flask import Flask
 
 # ====================== КОНФИГУРАЦИЯ ======================
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 AI21_API_KEY = os.getenv('AI21_API_KEY')
+PORT = int(os.environ.get('PORT', 5000))  # Render сам назначает порт
+
+# Инициализация Flask app для Web Service
+flask_app = Flask(__name__)
 
 # ====================== БАЗА ЗНАНИЙ ДЕДА КОЛИ ======================
 class KnowledgeBase:
@@ -19,7 +24,6 @@ class KnowledgeBase:
     
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            # Таблица для фактов о пользователях
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_facts (
                     id INTEGER PRIMARY KEY,
@@ -30,7 +34,6 @@ class KnowledgeBase:
                 )
             """)
             
-            # Таблица для общих знаний
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS general_knowledge (
                     id INTEGER PRIMARY KEY,
@@ -172,8 +175,6 @@ class Personality:
         return random.choice(["neutral", "sarcastic", "drunk"])
     
     def _extract_and_save_facts(self, user_id, user_input):
-        """Анализирует сообщение на наличие фактов и сохраняет их"""
-        # Шаблоны для извлечения фактов
         patterns = {
             "имя": r"(меня зовут|мое имя|зовут меня) ([а-яА-ЯёЁ]+)",
             "город": r"(я из|живу в|город) ([а-яА-ЯёЁ\s]+)",
@@ -192,19 +193,15 @@ class Personality:
         return None
 
     def generate_response(self, user_id, user_input: str, history: list, current_mood: str) -> tuple:
-        # Пытаемся извлечь факты из сообщения
         learn_result = self._extract_and_save_facts(user_id, user_input)
         if learn_result:
             return learn_result, "neutral"
         
-        # Определяем настроение
         new_mood = self._determine_mood(user_input)
         
-        # Получаем известные факты о пользователе
         user_facts = self.kb.get_user_facts(user_id)
         facts_str = "\n".join([f"- {fact[0]}: {fact[1]}" for fact in user_facts[:3]]) if user_facts else "Ничего не известно"
         
-        # Формируем контекст диалога
         context_lines = []
         for user_msg, bot_msg in history[-3:]:
             context_lines.append(f"User: {user_msg}")
@@ -212,31 +209,32 @@ class Personality:
         
         context = "\n".join(context_lines)
         
-        # Собираем полный промпт для AI21
         full_prompt = self.base_prompt.format(
             mood=new_mood,
             user_facts=facts_str,
             context=context
         ) + f"\nUser: {user_input}\nДед Коля:"
         
-        # Отправляем запрос в AI21
-        response = requests.post(
-            "https://api.ai21.com/studio/v1/jamba-instruct/complete",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": "jamba-1.5",
-                "prompt": full_prompt,
-                "temperature": 0.85,
-                "maxTokens": 250,
-                "stopSequences": ["\nUser:"]
-            }
-        )
-        
-        # Обрабатываем ответ
-        if response.status_code == 200:
-            bot_response = response.json()['completions'][0]['data']['text']
-        else:
-            bot_response = "Ой, курва, что-то сломалось... Давай позже!"
+        try:
+            response = requests.post(
+                "https://api.ai21.com/studio/v1/jamba-instruct/complete",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": "jamba-1.5",
+                    "prompt": full_prompt,
+                    "temperature": 0.85,
+                    "maxTokens": 250,
+                    "stopSequences": ["\nUser:"]
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                bot_response = response.json()['completions'][0]['data']['text']
+            else:
+                bot_response = f"Ой, курва, API вернуло {response.status_code}! Попробуй ещё раз."
+        except Exception as e:
+            bot_response = f"Чёрт, сломалось: {str(e)}"
         
         return bot_response, new_mood
 
@@ -245,9 +243,21 @@ knowledge_base = KnowledgeBase()
 memory = Memory()
 persona = Personality(knowledge_base)
 
+# ====================== ЗАПУСК ТЕЛЕГРАМ БОТА ======================
+def start_bot():
+    print("⚙️ Инициализация обучаемого бота Деда Коли...")
+    app = Application.builder().token(TOKEN).build()
+    
+    # Регистрируем обработчики
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("remember", remember_command))
+    app.add_handler(CommandHandler("teach", teach_command))
+    
+    print("🤖 Бот запущен в режиме polling...")
+    app.run_polling()
+
 # ====================== КОМАНДЫ ДЛЯ ОБУЧЕНИЯ ======================
 async def remember_command(update: Update, context):
-    """Команда для принудительного запоминания фактов"""
     user_id = str(update.message.from_user.id)
     if not context.args:
         await update.message.reply_text("Чё запоминать-то? Используй: /remember я люблю пиво")
@@ -258,7 +268,6 @@ async def remember_command(update: Update, context):
     await update.message.reply_text(f"Окей, курва, запомнил: {fact_text}")
 
 async def teach_command(update: Update, context):
-    """Команда для обучения общим знаниям"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("Используй: /teach трактор 'Т-25 ездит на солярке'")
         return
@@ -273,11 +282,9 @@ async def handle_message(update: Update, context):
     user_id = str(update.message.from_user.id)
     user_input = update.message.text
     
-    # Получаем историю и настроение
     history = memory.get_history(user_id)
     mood = memory.get_mood(user_id)
     
-    # Генерируем ответ
     response, new_mood = persona.generate_response(
         user_id=user_id,
         user_input=user_input,
@@ -285,23 +292,22 @@ async def handle_message(update: Update, context):
         current_mood=mood
     )
     
-    # Сохраняем и отправляем
     memory.save_interaction(user_id, user_input, response, new_mood)
     await update.message.reply_text(response)
 
-# ====================== ЗАПУСК БОТА ======================
-def main():
-    print("⚙️ Инициализация обучаемого бота Деда Коли...")
-    app = Application.builder().token(TOKEN).build()
-    
-    # Регистрируем обработчики
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CommandHandler("remember", remember_command))
-    app.add_handler(CommandHandler("teach", teach_command))
-    
-    # Старт в режиме polling
-    print("🤖 Бот запущен в режиме polling...")
-    app.run_polling()
+# ====================== FLASK РОУТ ДЛЯ RENDER ======================
+@flask_app.route('/')
+def home():
+    return "Дед Коля в работе! Бот запущен и работает."
 
+# ====================== ЗАПУСК ВСЕЙ СИСТЕМЫ ======================
 if __name__ == '__main__':
-    main()
+    import threading
+    
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=start_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Запускаем Flask сервер в главном потоке
+    flask_app.run(host='0.0.0.0', port=PORT)

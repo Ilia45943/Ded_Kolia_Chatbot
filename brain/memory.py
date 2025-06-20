@@ -3,7 +3,7 @@ from datetime import datetime
 
 class Memory:
     def __init__(self, db_path):
-        self.db_path = db_path
+        self.db_path = "/tmp/sessions.db"
         self._init_db()
     
     def _init_db(self):

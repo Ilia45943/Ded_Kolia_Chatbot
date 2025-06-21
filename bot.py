@@ -2,19 +2,18 @@ import os
 import logging
 import requests
 import json
+import sys
 from flask import Flask, request, jsonify
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes,
-    Dispatcher
+    ContextTypes
 )
 
 # Явно устанавливаем кодировку UTF-8
-import sys
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
@@ -37,14 +36,12 @@ for var in REQUIRED_VARS:
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
+HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
 
 # Используем стабильную модель
 MODEL_NAME = "mistralai/mistral-7b-instruct:free"
 
 app = Flask(__name__)
-
-# Создаем бота Telegram
-bot = Bot(token=TELEGRAM_TOKEN)
 
 class AIAssistant:
     def __init__(self):
@@ -89,7 +86,7 @@ class AIAssistant:
             if response.status_code == 200:
                 # Обработка ответа с явным указанием кодировки
                 content = response.json()['choices'][0]['message']['content']
-                return content.encode('utf-8').decode('utf-8')
+                return content
             else:
                 logger.error(f"Ошибка API: {response.status_code} - {response.text}")
                 return self.default_responses[0]
@@ -112,20 +109,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {str(e)}")
         await update.message.reply_text("Блядь, я сломался... Попробуй ещё раз!")
 
-# Инициализация диспетчера
-def setup_dispatcher():
+# Создаем приложение Telegram
+def create_application():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Инициализируем диспетчер
-    dispatcher = Dispatcher(application.bot, None, application=application)
-    return dispatcher, application
+    return application
 
-# Создаем диспетчер и приложение
-dispatcher, application = setup_dispatcher()
+# Создаем приложение
+telegram_app = create_application()
 
 # Flask роуты
 @app.route('/')
@@ -139,57 +134,68 @@ def test_ai():
         response = ai_assistant.generate_response(test_message)
         
         # Формируем ответ с явным указанием кодировки
-        resp = jsonify({
+        return jsonify({
             "status": "success",
             "request": test_message,
             "response": response
         })
-        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
-        return resp
     except Exception as e:
-        error_resp = jsonify({
+        return jsonify({
             "status": "error",
             "message": str(e)
-        })
-        error_resp.headers['Content-Type'] = 'application/json; charset=utf-8'
-        return error_resp, 500
+        }), 500
 
 @app.route('/telegram_webhook', methods=['POST'])
-def telegram_webhook():
+async def telegram_webhook():
     try:
         # Обрабатываем входящее обновление
-        update = Update.de_json(request.json, bot)
-        dispatcher.process_update(update)
+        update = Update.de_json(request.json, telegram_app.bot)
+        await telegram_app.update_queue.put(update)
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-def set_webhook():
+async def set_webhook():
     """Устанавливаем вебхук"""
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/telegram_webhook"
-    bot.set_webhook(webhook_url)
+    webhook_url = f"https://{HOSTNAME}/telegram_webhook"
+    await telegram_app.bot.set_webhook(webhook_url)
     logger.info(f"Вебхук установлен: {webhook_url}")
+
+async def run_bot():
+    """Запускаем бота"""
+    try:
+        # Устанавливаем вебхук
+        await set_webhook()
+        
+        # Запускаем обработку обновлений
+        await telegram_app.start()
+        logger.info("🤖 Бот запущен и готов к работе!")
+        
+        # Ожидаем завершения
+        await telegram_app.updater.start_polling()
+        await telegram_app.idle()
+        
+    except Exception as e:
+        logger.critical(f"Ошибка запуска бота: {str(e)}")
+    finally:
+        await telegram_app.stop()
 
 def start_bot():
     """Запускаем бота в отдельном потоке"""
-    try:
-        # Устанавливаем вебхук
-        set_webhook()
-        
-        # Запускаем обработку обновлений
-        application.run_polling()
-        logger.info("🤖 Бот запущен и готов к работе!")
-    except Exception as e:
-        logger.critical(f"Ошибка запуска бота: {str(e)}")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_bot())
 
 if __name__ == '__main__':
     # Запускаем бота в отдельном потоке
     import threading
+    import asyncio
+    
     bot_thread = threading.Thread(target=start_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
     # Запускаем Flask
     logger.info(f"🌐 Запускаем Flask на порту {PORT}")
-    app.run(host='0.0.0.0', port=PORT)
+    app.run(host='0.0.0.0', port=PORT, use_reloader=False)

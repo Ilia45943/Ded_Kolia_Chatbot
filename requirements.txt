@@ -1,5 +1,6 @@
 flask[async]
 python-telegram-bot==20.3
-requests
 aiohttp
 hypercorn
+uvicorn
+requests

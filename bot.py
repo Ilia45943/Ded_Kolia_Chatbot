@@ -5,6 +5,8 @@ import json
 import sys
 import sqlite3
 import re
+import asyncio  # Добавлен критически важный импорт
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Update
@@ -41,7 +43,7 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
 HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
 
-# Логируем HOSTNAME для проверки
+# Логируем важные параметры
 logger.info(f"Текущий HOSTNAME: {HOSTNAME}")
 logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
 logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
@@ -293,18 +295,11 @@ def test_ai():
 def telegram_webhook():
     try:
         logger.info("Получен вебхук от Telegram")
-        
-        # Подробное логгирование для отладки
-        logger.debug(f"Headers: {request.headers}")
-        logger.debug(f"Body: {request.data[:500]}...")
-        
         update = Update.de_json(request.json, telegram_app.bot)
         telegram_app.update_queue.put(update)
-        
-        logger.info("Обновление обработано")
         return '', 200
     except Exception as e:
-        logger.error(f"Ошибка вебхука: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка вебхука: {str(e)}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/check_env')
@@ -344,9 +339,6 @@ if __name__ == '__main__':
     set_webhook()
     
     # Запускаем бота в отдельном потоке
-    import threading
-    import asyncio
-    
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()

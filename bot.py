@@ -4,6 +4,7 @@ import sqlite3
 import requests
 import re
 import asyncio
+import json
 from datetime import datetime
 from telegram import Update
 from telegram.ext import (
@@ -27,14 +28,13 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')
 PORT = int(os.environ.get('PORT', 10000))
-MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
+MODEL_NAME = "deepseek/deepseek-r1-0528-qwen3-8b:free"  # Исправленное имя модели
 
 # Инициализация Flask
 app = Flask(__name__)
 
 # Глобальная переменная для приложения Telegram
 telegram_app = None
-loop = None  # Глобальный цикл событий
 
 # ====================== БАЗА ЗНАНИЙ ======================
 class KnowledgeBase:
@@ -152,11 +152,12 @@ class DedKolia:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",  # Добавлен обязательный заголовок
             "HTTP-Referer": WEBHOOK_URL or "https://ded-kolia-bot.com",
             "X-Title": "Дед Коля Бот"
         }
         payload = {
-            "model": "deepseek/deepseek-r1:free",
+            "model": MODEL_NAME,  # Используем исправленное имя модели
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message}
@@ -166,14 +167,16 @@ class DedKolia:
         }
         
         try:
+            logger.info(f"Отправка запроса к OpenRouter API с моделью: {MODEL_NAME}")
             response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
             else:
-                logger.error(f"API error: {response.status_code} - {response.text}")
+                logger.error(f"Ошибка API: {response.status_code} - {response.text}")
                 return "Ой, курва, что-то сломалось... Попробуй позже!"
         except Exception as e:
-            logger.error(f"Request failed: {str(e)}")
+            logger.error(f"Сбой запроса: {str(e)}")
             return "Чёрт, сломалось! Давай ещё раз попробуем."
 
 # Инициализация систем
@@ -204,24 +207,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Инициализация приложения Telegram
 def init_telegram_app():
-    global telegram_app, loop
-    
+    global telegram_app
     if not telegram_app:
-        # Создаем приложение Telegram
         telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Добавляем обработчики
         telegram_app.add_handler(CommandHandler("start", start))
         telegram_app.add_handler(CommandHandler("remember", remember_command))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Инициализируем приложение в цикле событий
-        if loop:
-            asyncio.run_coroutine_threadsafe(telegram_app.initialize(), loop)
-            asyncio.run_coroutine_threadsafe(telegram_app.start(), loop)
-        else:
-            logger.error("Event loop not initialized!")
-    
     return telegram_app
 
 # Flask роуты
@@ -233,22 +224,21 @@ def home():
 def set_webhook():
     try:
         if not WEBHOOK_URL:
-            return jsonify({"status": "error", "message": "WEBHOOK_URL not configured"}), 500
+            return jsonify({"status": "error", "message": "WEBHOOK_URL не настроен"}), 500
         
-        # Инициализируем приложение Telegram
         init_telegram_app()
-        
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        asyncio.run_coroutine_threadsafe(
-            telegram_app.bot.set_webhook(webhook_url), 
-            loop
-        )
+        
+        # Синхронная установка вебхука
+        with telegram_app:
+            telegram_app.bot.set_webhook(webhook_url)
+        
         return jsonify({
             "status": "success",
-            "message": f"Webhook set to {webhook_url}"
+            "message": f"Вебхук установлен: {webhook_url}"
         }), 200
     except Exception as e:
-        logger.error(f"Error setting webhook: {str(e)}")
+        logger.error(f"Ошибка установки вебхука: {str(e)}")
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -257,24 +247,41 @@ def set_webhook():
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
     try:
-        # Инициализируем приложение Telegram, если еще не инициализировано
-        if not telegram_app:
-            init_telegram_app()
-        
-        # Обработка обновления через глобальное приложение
+        init_telegram_app()
         update = Update.de_json(request.json, telegram_app.bot)
-        asyncio.run_coroutine_threadsafe(
-            telegram_app.process_update(update),
-            loop
-        )
+        
+        # Синхронная обработка обновления
+        with telegram_app:
+            telegram_app.process_update(update)
+        
         return '', 200
     except Exception as e:
-        logger.error(f"Error processing update: {str(e)}")
+        logger.error(f"Ошибка обработки обновления: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-async def main():
-    global loop
-    
+@app.route('/test_bot', methods=['GET'])
+def test_bot():
+    """Тестовая функция для проверки работы бота"""
+    try:
+        init_telegram_app()
+        test_message = "Привет! Это тест работы бота."
+        test_response = ded_kolia.generate_response("test_user", test_message)
+        
+        return jsonify({
+            "status": "success",
+            "test_message": test_message,
+            "bot_response": test_response
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT)
+
+if __name__ == '__main__':
     # Проверка обязательных переменных
     required_vars = [
         ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
@@ -286,7 +293,6 @@ async def main():
     
     if missing:
         logger.error(f"ОШИБКА: Отсутствуют обязательные переменные: {', '.join(missing)}")
-        logger.error("Пожалуйста, установите их в настройках Render")
         exit(1)
     
     logger.info("="*50)
@@ -294,44 +300,24 @@ async def main():
     logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
     logger.info(f"WEBHOOK_URL: {'установлен' if WEBHOOK_URL else 'отсутствует'}")
     logger.info(f"PORT: {PORT}")
+    logger.info(f"МОДЕЛЬ: {MODEL_NAME}")
     logger.info("="*50)
     
     # Инициализация приложения Telegram
     init_telegram_app()
     
     # Установка вебхука
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        await telegram_app.bot.set_webhook(webhook_url)
-        logger.info(f"🚀 Вебхук установлен: {webhook_url}")
-    else:
-        logger.warning("⚠️ WEBHOOK_URL не установлен, вебхук не настроен")
-    
-    logger.info(f"🤖 Бот запущен и готов к работе!")
-
-if __name__ == '__main__':
-    # Создаем и запускаем цикл событий
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     try:
-        # Инициализируем системы
-        knowledge_base = KnowledgeBase()
-        memory = Memory()
-        ded_kolia = DedKolia(knowledge_base, memory)
-        
-        # Запускаем основную асинхронную задачу
-        loop.run_until_complete(main())
-        
-        # Запускаем Flask в основном потоке
-        app.run(host='0.0.0.0', port=PORT)
-    except KeyboardInterrupt:
-        logger.info("Приложение остановлено пользователем")
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+            with telegram_app:
+                telegram_app.bot.set_webhook(webhook_url)
+            logger.info(f"🚀 Вебхук установлен: {webhook_url}")
+        else:
+            logger.warning("⚠️ WEBHOOK_URL не установлен, вебхук не настроен")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {str(e)}")
-    finally:
-        # Корректная остановка приложения Telegram
-        if telegram_app:
-            loop.run_until_complete(telegram_app.stop())
-            loop.run_until_complete(telegram_app.shutdown())
-        loop.close()
+        logger.error(f"Ошибка при установке вебхука: {str(e)}")
+    
+    # Запуск Flask
+    logger.info(f"🤖 Запускаем Flask на порту {PORT}...")
+    run_flask()

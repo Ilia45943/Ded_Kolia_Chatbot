@@ -5,7 +5,7 @@ import json
 import sys
 import sqlite3
 import re
-import asyncio  # Добавлен критически важный импорт
+import asyncio
 import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -41,10 +41,18 @@ for var in REQUIRED_VARS:
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
-HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
+
+# Автоматическое определение URL на Render.com
+RENDER_SERVICE_NAME = os.getenv('RENDER_SERVICE_NAME')
+if RENDER_SERVICE_NAME:
+    HOSTNAME = f"{RENDER_SERVICE_NAME}.onrender.com"
+    logger.info(f"Определен Render Service Name: {RENDER_SERVICE_NAME}")
+else:
+    HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
+    logger.warning(f"RENDER_SERVICE_NAME не установлен, используем HOSTNAME: {HOSTNAME}")
 
 # Логируем важные параметры
-logger.info(f"Текущий HOSTNAME: {HOSTNAME}")
+logger.info(f"Используемый HOSTNAME: {HOSTNAME}")
 logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
 logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
 
@@ -310,29 +318,36 @@ def check_env():
         "TELEGRAM_TOKEN": bool(TELEGRAM_TOKEN),
         "OPENROUTER_API_KEY": bool(OPENROUTER_API_KEY),
         "PORT": PORT,
-        "MODEL": MODEL_NAME
+        "MODEL": MODEL_NAME,
+        "RENDER_SERVICE_NAME": RENDER_SERVICE_NAME
     })
 
 async def set_webhook_task():
     """Устанавливаем вебхук"""
     webhook_url = f"https://{HOSTNAME}/telegram_webhook"
+    logger.info(f"Устанавливаем вебхук на: {webhook_url}")
     await telegram_app.bot.set_webhook(webhook_url)
-    logger.info(f"Вебхук установлен: {webhook_url}")
+    logger.info(f"✅ Вебхук успешно установлен")
 
 def set_webhook():
     """Синхронная обертка для установки вебхука"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(set_webhook_task())
-    loop.close()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(set_webhook_task())
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {str(e)}")
 
 def run_bot():
     """Запускаем бота в фоновом режиме"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(telegram_app.start())
-    logger.info("🤖 Бот запущен и готов к работе!")
-    loop.run_forever()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.start())
+        logger.info("🤖 Бот запущен и готов к работе!")
+        loop.run_forever()
+    except Exception as e:
+        logger.error(f"Ошибка запуска бота: {str(e)}")
 
 if __name__ == '__main__':
     # Устанавливаем вебхук

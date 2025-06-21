@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')  # Убедимся, что нет слеша в конце
 PORT = int(os.environ.get('PORT', 10000))
 MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
 
@@ -175,7 +175,7 @@ class DedKolia:
             logger.error(f"Request failed: {str(e)}")
             return "Чёрт, сломалось! Давай ещё раз попробуем."
 
-# Инициализация систем
+# Инициализация систем (ПЕРЕМЕЩЕНО В ГЛОБАЛЬНУЮ ОБЛАСТЬ)
 knowledge_base = KnowledgeBase()
 memory = Memory()
 ded_kolia = DedKolia(knowledge_base, memory)
@@ -204,10 +204,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Инициализация приложения Telegram
 def init_telegram_app():
     global telegram_app
-    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("remember", remember_command))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    if not telegram_app:
+        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+        telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CommandHandler("remember", remember_command))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return telegram_app
 
 # Flask роуты
@@ -216,22 +217,39 @@ def home():
     return f"🤖 Дед Коля в работе! Модель: {MODEL_NAME}"
 
 @app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
+def set_webhook():
     try:
-        app = init_telegram_app()
+        if not WEBHOOK_URL:
+            return jsonify({"status": "error", "message": "WEBHOOK_URL not configured"}), 500
+        
+        # Инициализируем приложение Telegram, если еще не инициализировано
+        if not telegram_app:
+            init_telegram_app()
+        
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        await app.bot.set_webhook(webhook_url)
-        return jsonify({"status": "success", "message": f"Webhook set to {webhook_url}"}), 200
+        # Используем глобальное приложение вместо создания нового
+        asyncio.run(telegram_app.bot.set_webhook(webhook_url))
+        return jsonify({
+            "status": "success",
+            "message": f"Webhook set to {webhook_url}"
+        }), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Error setting webhook: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 @app.route('/telegram_webhook', methods=['POST'])
-async def telegram_webhook():
+def telegram_webhook():
     try:
-        app = init_telegram_app()
-        await app.initialize()
-        update = Update.de_json(request.json, app.bot)
-        await app.process_update(update)
+        # Инициализируем приложение Telegram, если еще не инициализировано
+        if not telegram_app:
+            init_telegram_app()
+        
+        # Обработка обновления через глобальное приложение
+        update = Update.de_json(request.json, telegram_app.bot)
+        asyncio.run(telegram_app.process_update(update))
         return '', 200
     except Exception as e:
         logger.error(f"Error processing update: {str(e)}")
@@ -263,20 +281,29 @@ async def main():
     init_telegram_app()
     
     # Установка вебхука
-    await set_webhook()
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+        await telegram_app.bot.set_webhook(webhook_url)
+        logger.info(f"🚀 Вебхук установлен: {webhook_url}")
+    else:
+        logger.warning("⚠️ WEBHOOK_URL не установлен, вебхук не настроен")
     
-    logger.info(f"🚀 Бот запущен и готов к работе!")
+    logger.info(f"🤖 Бот запущен и готов к работе!")
 
 if __name__ == '__main__':
-    # Создаем новый цикл событий для асинхронного запуска
-    loop = asyncio.get_event_loop()
+    # Создаем и запускаем цикл событий
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
+        # Запускаем основную асинхронную задачу
         loop.run_until_complete(main())
-        # Запускаем Flask в отдельном потоке
-        from threading import Thread
-        Thread(target=lambda: app.run(host='0.0.0.0', port=PORT)).start()
-        loop.run_forever()
+        
+        # Запускаем Flask в основном потоке
+        app.run(host='0.0.0.0', port=PORT)
     except KeyboardInterrupt:
-        pass
+        logger.info("Приложение остановлено пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {str(e)}")
     finally:
         loop.close()

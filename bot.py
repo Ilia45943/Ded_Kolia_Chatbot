@@ -47,7 +47,8 @@ class AIAssistant:
             "Курва, сервера тупят! Ну расскажи, что у тебя нового?"
         ]
 
-    def generate_response(self, user_message):
+    async def generate_response_async(self, user_message):
+        """Асинхронная генерация ответа через OpenRouter"""
         try:
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -70,18 +71,22 @@ class AIAssistant:
                 "max_tokens": 300
             }
 
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
-            else:
-                logger.error(f"Ошибка API: {response.status_code} - {response.text}")
-                return self.default_responses[0]
+            # Используем асинхронные HTTP-запросы
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=10
+                ) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        return data['choices'][0]['message']['content']
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Ошибка API: {response.status} - {error_text}")
+                        return self.default_responses[0]
                 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {str(e)}")
@@ -97,7 +102,8 @@ async def start(update: Update, context: CallbackContext):
 async def handle_message(update: Update, context: CallbackContext):
     try:
         logger.info(f"Получено сообщение: {update.message.text}")
-        response = ai_assistant.generate_response(update.message.text)
+        # Используем асинхронную версию генерации ответа
+        response = await ai_assistant.generate_response_async(update.message.text)
         logger.info(f"Отправка ответа: {response}")
         await update.message.reply_text(response)
     except Exception as e:
@@ -125,7 +131,8 @@ def home():
 def test_ai():
     try:
         test_message = "Привет! Как дела?"
-        response = ai_assistant.generate_response(test_message)
+        # Для тестового роута используем синхронный вызов
+        response = asyncio.run(ai_assistant.generate_response_async(test_message))
         return jsonify({
             "status": "success",
             "request": test_message,
@@ -138,27 +145,33 @@ def test_ai():
         }), 500
 
 @app.route('/telegram_webhook', methods=['POST'])
-async def telegram_webhook():
+def telegram_webhook():
+    """СИНХРОННЫЙ обработчик вебхука"""
     try:
         logger.info("Получено обновление от Telegram")
+        # Обрабатываем обновление в отдельном потоке
         update = Update.de_json(request.json, telegram_app.bot)
-        await telegram_app.process_update(update)
+        
+        # Запускаем асинхронную обработку в отдельном потоке
+        asyncio.run_coroutine_threadsafe(
+            telegram_app.process_update(update), 
+            telegram_app.updater.bot.loop
+        )
+        
         return '', 200
     except Exception as e:
         logger.error(f"Ошибка вебхука: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-async def set_webhook():
-    """Устанавливаем вебхук"""
-    webhook_url = f"https://{HOSTNAME}/telegram_webhook"
-    await telegram_app.bot.set_webhook(webhook_url)
-    logger.info(f"Вебхук установлен: {webhook_url}")
-
 async def run_bot():
-    """Запускаем бота"""
+    """Запускаем бота и устанавливаем вебхук"""
     try:
         # Устанавливаем вебхук
-        await set_webhook()
+        webhook_url = f"https://{HOSTNAME}/telegram_webhook"
+        await telegram_app.bot.set_webhook(webhook_url)
+        logger.info(f"Вебхук установлен: {webhook_url}")
+        
+        # Запускаем обработку обновлений
         logger.info("🤖 Бот запущен и готов к работе!")
     except Exception as e:
         logger.critical(f"Ошибка запуска бота: {str(e)}")
@@ -168,6 +181,7 @@ def start_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_bot())
+    loop.run_forever()  # Важно: держим петлю активной
 
 if __name__ == '__main__':
     # Запускаем бота в отдельном потоке
@@ -177,6 +191,17 @@ if __name__ == '__main__':
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Запускаем Flask
+    # Запускаем Flask с поддержкой async
     logger.info(f"🌐 Запускаем сервер на порту {PORT}")
-    app.run(host='0.0.0.0', port=PORT, use_reloader=False)
+    
+    # Для локальной разработки
+    if os.getenv('ENV') == 'development':
+        app.run(host='0.0.0.0', port=PORT, use_reloader=False)
+    else:
+        # Для продакшена используем ASGI-сервер
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        
+        config = Config()
+        config.bind = [f"0.0.0.0:{PORT}"]
+        asyncio.run(serve(app, config))

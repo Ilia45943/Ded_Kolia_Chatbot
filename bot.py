@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')  # Убедимся, что нет слеша в конце
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')
 PORT = int(os.environ.get('PORT', 10000))
 MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
 
@@ -34,6 +34,7 @@ app = Flask(__name__)
 
 # Глобальная переменная для приложения Telegram
 telegram_app = None
+loop = None  # Глобальный цикл событий
 
 # ====================== БАЗА ЗНАНИЙ ======================
 class KnowledgeBase:
@@ -175,7 +176,7 @@ class DedKolia:
             logger.error(f"Request failed: {str(e)}")
             return "Чёрт, сломалось! Давай ещё раз попробуем."
 
-# Инициализация систем (ПЕРЕМЕЩЕНО В ГЛОБАЛЬНУЮ ОБЛАСТЬ)
+# Инициализация систем
 knowledge_base = KnowledgeBase()
 memory = Memory()
 ded_kolia = DedKolia(knowledge_base, memory)
@@ -203,12 +204,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Инициализация приложения Telegram
 def init_telegram_app():
-    global telegram_app
+    global telegram_app, loop
+    
     if not telegram_app:
+        # Создаем приложение Telegram
         telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Добавляем обработчики
         telegram_app.add_handler(CommandHandler("start", start))
         telegram_app.add_handler(CommandHandler("remember", remember_command))
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Инициализируем приложение в цикле событий
+        if loop:
+            asyncio.run_coroutine_threadsafe(telegram_app.initialize(), loop)
+            asyncio.run_coroutine_threadsafe(telegram_app.start(), loop)
+        else:
+            logger.error("Event loop not initialized!")
+    
     return telegram_app
 
 # Flask роуты
@@ -222,13 +235,14 @@ def set_webhook():
         if not WEBHOOK_URL:
             return jsonify({"status": "error", "message": "WEBHOOK_URL not configured"}), 500
         
-        # Инициализируем приложение Telegram, если еще не инициализировано
-        if not telegram_app:
-            init_telegram_app()
+        # Инициализируем приложение Telegram
+        init_telegram_app()
         
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        # Используем глобальное приложение вместо создания нового
-        asyncio.run(telegram_app.bot.set_webhook(webhook_url))
+        asyncio.run_coroutine_threadsafe(
+            telegram_app.bot.set_webhook(webhook_url), 
+            loop
+        )
         return jsonify({
             "status": "success",
             "message": f"Webhook set to {webhook_url}"
@@ -249,13 +263,18 @@ def telegram_webhook():
         
         # Обработка обновления через глобальное приложение
         update = Update.de_json(request.json, telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
+        asyncio.run_coroutine_threadsafe(
+            telegram_app.process_update(update),
+            loop
+        )
         return '', 200
     except Exception as e:
         logger.error(f"Error processing update: {str(e)}")
         return jsonify({"status": "error"}), 500
 
 async def main():
+    global loop
+    
     # Проверка обязательных переменных
     required_vars = [
         ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
@@ -296,6 +315,11 @@ if __name__ == '__main__':
     asyncio.set_event_loop(loop)
     
     try:
+        # Инициализируем системы
+        knowledge_base = KnowledgeBase()
+        memory = Memory()
+        ded_kolia = DedKolia(knowledge_base, memory)
+        
         # Запускаем основную асинхронную задачу
         loop.run_until_complete(main())
         
@@ -306,4 +330,8 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Критическая ошибка: {str(e)}")
     finally:
+        # Корректная остановка приложения Telegram
+        if telegram_app:
+            loop.run_until_complete(telegram_app.stop())
+            loop.run_until_complete(telegram_app.shutdown())
         loop.close()

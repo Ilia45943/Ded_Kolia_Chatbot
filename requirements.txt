@@ -1,6 +1,3 @@
-flask[async]
+quart
 python-telegram-bot==20.3
 aiohttp
-hypercorn
-uvicorn
-requests

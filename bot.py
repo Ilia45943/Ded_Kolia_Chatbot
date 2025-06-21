@@ -2,7 +2,7 @@ import os
 import logging
 import aiohttp
 import asyncio
-from flask import Flask, request, jsonify
+from quart import Quart, request, jsonify
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -34,7 +34,7 @@ HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
 # Используем стабильную модель
 MODEL_NAME = "mistralai/mistral-7b-instruct:free"
 
-app = Flask(__name__)
+app = Quart(__name__)
 
 class AIAssistant:
     def __init__(self):
@@ -43,7 +43,6 @@ class AIAssistant:
             "Эх, технологии сегодня не в духе... Как сам-то?",
             "Курва, сервера тупят! Ну расскажи, что у тебя нового?"
         ]
-        self.session = aiohttp.ClientSession()
 
     async def generate_response(self, user_message):
         try:
@@ -68,21 +67,22 @@ class AIAssistant:
                 "max_tokens": 300
             }
 
-            async with self.session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=10
-            ) as response:
-                
-                if response.status == 200:
-                    data = await response.json()
-                    return data['choices'][0]['message']['content']
-                else:
-                    error_text = await response.text()
-                    logger.error(f"Ошибка API: {response.status} - {error_text}")
-                    return self.default_responses[0]
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=10
+                ) as response:
                     
+                    if response.status == 200:
+                        data = await response.json()
+                        return data['choices'][0]['message']['content']
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Ошибка API: {response.status} - {error_text}")
+                        return self.default_responses[0]
+                
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {str(e)}")
             return self.default_responses[1]
@@ -95,12 +95,7 @@ async def start(update: Update, context: CallbackContext):
 async def handle_message(update: Update, context: CallbackContext):
     try:
         logger.info(f"Получено сообщение: {update.message.text}")
-        ai_assistant = context.bot_data.get('ai_assistant')
-        if not ai_assistant:
-            logger.error("AI Assistant не инициализирован!")
-            await update.message.reply_text("Блядь, я сломался... Попробуй ещё раз!")
-            return
-            
+        ai_assistant = app.config.get('ai_assistant')
         response = await ai_assistant.generate_response(update.message.text)
         logger.info(f"Отправка ответа: {response}")
         await update.message.reply_text(response)
@@ -109,11 +104,8 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("Блядь, я сломался... Попробуй ещё раз!")
 
 # Создаем и настраиваем приложение Telegram
-def setup_application():
+def setup_telegram():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Инициализируем AI Assistant и сохраняем в bot_data
-    application.bot_data['ai_assistant'] = AIAssistant()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
@@ -121,16 +113,16 @@ def setup_application():
     
     return application
 
-# Flask роуты
+# Quart роуты
 @app.route('/')
-def home():
+async def home():
     return "🤖 Дед Коля в работе!"
 
 @app.route('/test_ai')
 async def test_ai():
     try:
         test_message = "Привет! Как дела?"
-        ai_assistant = AIAssistant()
+        ai_assistant = app.config.get('ai_assistant')
         response = await ai_assistant.generate_response(test_message)
         return jsonify({
             "status": "success",
@@ -147,52 +139,50 @@ async def test_ai():
 async def telegram_webhook():
     try:
         logger.info("Получено обновление от Telegram")
-        application = app.config.get('telegram_application')
+        application = app.config.get('telegram_app')
         
         if not application:
             logger.error("Telegram Application не инициализирован!")
             return jsonify({"status": "error"}), 500
             
-        update = Update.de_json(await request.get_json(), application.bot)
+        data = await request.get_json()
+        update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return '', 200
     except Exception as e:
         logger.error(f"Ошибка вебхука: {str(e)}")
         return jsonify({"status": "error"}), 500
 
+async def run_bot():
+    """Запускаем бота и устанавливаем вебхук"""
+    try:
+        # Инициализируем приложение Telegram
+        telegram_app = setup_telegram()
+        app.config['telegram_app'] = telegram_app
+        
+        # Инициализируем AI Assistant
+        ai_assistant = AIAssistant()
+        app.config['ai_assistant'] = ai_assistant
+        
+        # Устанавливаем вебхук
+        webhook_url = f"https://{HOSTNAME}/telegram_webhook"
+        await telegram_app.bot.set_webhook(webhook_url)
+        logger.info(f"🚀 Вебхук установлен: {webhook_url}")
+        
+        logger.info("🤖 ИИ Дед Коля инициализирован и готов к работе!")
+        return telegram_app
+    except Exception as e:
+        logger.critical(f"Ошибка запуска бота: {str(e)}")
+        raise
+
 async def main():
     """Основная асинхронная функция для запуска всего приложения"""
-    # Инициализируем приложение Telegram
-    application = setup_application()
-    app.config['telegram_application'] = application
+    # Запускаем бота
+    await run_bot()
     
-    # Устанавливаем вебхук
-    webhook_url = f"https://{HOSTNAME}/telegram_webhook"
-    await application.bot.set_webhook(webhook_url)
-    logger.info(f"🚀 Вебхук установлен: {webhook_url}")
-    
-    # Запускаем AI Assistant
-    logger.info("🤖 ИИ Дед Коля инициализирован и готов к работе!")
-    
-    # Для продакшена используем Hypercorn
-    if os.getenv('ENV') == 'production':
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-        
-        config = Config()
-        config.bind = [f"0.0.0.0:{PORT}"]
-        await serve(app, config)
-    else:
-        # Для разработки
-        import uvicorn
-        await uvicorn.Server(
-            config=uvicorn.Config(
-                app=app,
-                host="0.0.0.0",
-                port=PORT,
-                use_colors=True
-            )
-        ).serve()
+    # Запускаем сервер
+    logger.info(f"🌐 Запускаем сервер на порту {PORT}")
+    await app.run_task(host='0.0.0.0', port=PORT)
 
 if __name__ == '__main__':
     asyncio.run(main())

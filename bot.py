@@ -3,7 +3,6 @@ import logging
 import requests
 import json
 import sys
-import asyncio
 import sqlite3
 import re
 from datetime import datetime
@@ -42,6 +41,11 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
 HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')
 
+# Логируем HOSTNAME для проверки
+logger.info(f"Текущий HOSTNAME: {HOSTNAME}")
+logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
+logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
+
 # Используем стабильную модель
 MODEL_NAME = "mistralai/mistral-7b-instruct:free"
 
@@ -74,6 +78,7 @@ def init_db():
             )
         """)
         conn.commit()
+    logger.info("База данных инициализирована")
 
 # Инициализация БД при старте
 init_db()
@@ -151,8 +156,8 @@ class AIAssistant:
                 user_facts = cursor.fetchall()
             
             # Формируем контекст для нейросети
-            facts = "\n".join(f"{fact[0]}: {fact[1]}" for fact in user_facts) or "Ничего не известно"
-            context = "\n".join(f"User: {msg[0]}\nBot: {msg[1]}" for msg in history) if history else "Нет истории"
+            facts = "\n".join(f"{fact['fact']}: {fact['value']}" for fact in user_facts) or "Ничего не известно"
+            context = "\n".join(f"User: {msg['user_message']}\nBot: {msg['bot_response']}" for msg in history) if history else "Нет истории"
             
             # Системный промпт с персонажем
             system_prompt = f"""Ты — Дед Коля (67 лет). Отвечай как матерый старик:
@@ -207,6 +212,7 @@ ai_assistant = AIAssistant()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("👴 Дед Коля на связи! Шо надо, курва?")
+        logger.info(f"Обработана команда /start от {update.effective_user.id}")
     except Exception as e:
         logger.error(f"Ошибка в команде /start: {str(e)}")
 
@@ -225,6 +231,7 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """, (user_id, fact_text, datetime.now().isoformat()))
             conn.commit()
         await update.message.reply_text(f"✅ Окей, курва, запомнил: {fact_text}")
+        logger.info(f"Пользователь {user_id} добавил факт: {fact_text}")
     except Exception as e:
         logger.error(f"Ошибка в команде /remember: {str(e)}")
         await update.message.reply_text("Блядь, не запомнилось... Давай ещё раз?")
@@ -234,9 +241,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.message.from_user.id)
         user_input = update.message.text
         
+        logger.info(f"Получено сообщение от {user_id}: {user_input}")
+        
         response = ai_assistant.generate_response(user_id, user_input)
         ai_assistant.save_interaction(user_id, user_input, response)
         
+        logger.info(f"Отправляем ответ: {response[:50]}...")
         await update.message.reply_text(response)
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {str(e)}")
@@ -265,6 +275,7 @@ def test_ai():
     try:
         test_user_id = "test_user"
         test_message = "Привет! Как дела?"
+        logger.info(f"Тестовый запрос: {test_message}")
         response = ai_assistant.generate_response(test_user_id, test_message)
         
         return jsonify({
@@ -281,13 +292,31 @@ def test_ai():
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
     try:
-        # Обрабатываем входящее обновление
+        logger.info("Получен вебхук от Telegram")
+        
+        # Подробное логгирование для отладки
+        logger.debug(f"Headers: {request.headers}")
+        logger.debug(f"Body: {request.data[:500]}...")
+        
         update = Update.de_json(request.json, telegram_app.bot)
         telegram_app.update_queue.put(update)
+        
+        logger.info("Обновление обработано")
         return '', 200
     except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
+        logger.error(f"Ошибка вебхука: {str(e)}", exc_info=True)
         return jsonify({"status": "error"}), 500
+
+@app.route('/check_env')
+def check_env():
+    """Проверка переменных окружения"""
+    return jsonify({
+        "HOSTNAME": HOSTNAME,
+        "TELEGRAM_TOKEN": bool(TELEGRAM_TOKEN),
+        "OPENROUTER_API_KEY": bool(OPENROUTER_API_KEY),
+        "PORT": PORT,
+        "MODEL": MODEL_NAME
+    })
 
 async def set_webhook_task():
     """Устанавливаем вебхук"""
@@ -316,6 +345,8 @@ if __name__ == '__main__':
     
     # Запускаем бота в отдельном потоке
     import threading
+    import asyncio
+    
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()

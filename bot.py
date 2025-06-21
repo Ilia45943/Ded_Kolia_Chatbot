@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import requests
 import re
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import (
@@ -21,19 +22,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация - используем os.getenv() с явными значениями по умолчанию
+# Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-PORT = int(os.environ.get('PORT', 10000))  # Render автоматически устанавливает PORT
+PORT = int(os.environ.get('PORT', 10000))
 MODEL_NAME = "DeepSeek R1 0528 Qwen 3.8B"
 
 # Инициализация Flask
 app = Flask(__name__)
 
+# Глобальная переменная для приложения Telegram
+telegram_app = None
+
 # ====================== БАЗА ЗНАНИЙ ======================
 class KnowledgeBase:
-    def __init__(self, db_path=":memory:"):  # Используем in-memory базу для простоты
+    def __init__(self, db_path=":memory:"):
         self.db_path = db_path
         self._init_db()
     
@@ -197,30 +201,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     memory.save_interaction(user_id, user_input, response)
     await update.message.reply_text(response)
 
+# Инициализация приложения Telegram
+def init_telegram_app():
+    global telegram_app
+    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("remember", remember_command))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return telegram_app
+
 # Flask роуты
 @app.route('/')
 def home():
     return f"🤖 Дед Коля в работе! Модель: {MODEL_NAME}"
 
 @app.route('/set_webhook', methods=['GET'])
-def set_webhook():
+async def set_webhook():
     try:
-        # Создаем приложение Telegram
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("remember", remember_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Устанавливаем вебхук
+        app = init_telegram_app()
         webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=webhook_url
-        )
-        
+        await app.bot.set_webhook(webhook_url)
         return jsonify({"status": "success", "message": f"Webhook set to {webhook_url}"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -228,25 +228,16 @@ def set_webhook():
 @app.route('/telegram_webhook', methods=['POST'])
 async def telegram_webhook():
     try:
-        # Создаем приложение Telegram
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("remember", remember_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Обрабатываем обновление
-        await application.initialize()
-        update = Update.de_json(request.json, application.bot)
-        await application.process_update(update)
-        
+        app = init_telegram_app()
+        await app.initialize()
+        update = Update.de_json(request.json, app.bot)
+        await app.process_update(update)
         return '', 200
     except Exception as e:
         logger.error(f"Error processing update: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-def main():
+async def main():
     # Проверка обязательных переменных
     required_vars = [
         ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
@@ -268,8 +259,24 @@ def main():
     logger.info(f"PORT: {PORT}")
     logger.info("="*50)
     
-    logger.info(f"🚀 Запуск бота с моделью {MODEL_NAME} на порту {PORT}...")
-    app.run(host='0.0.0.0', port=PORT)
+    # Инициализация приложения Telegram
+    init_telegram_app()
+    
+    # Установка вебхука
+    await set_webhook()
+    
+    logger.info(f"🚀 Бот запущен и готов к работе!")
 
 if __name__ == '__main__':
-    main()
+    # Создаем новый цикл событий для асинхронного запуска
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+        # Запускаем Flask в отдельном потоке
+        from threading import Thread
+        Thread(target=lambda: app.run(host='0.0.0.0', port=PORT)).start()
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()

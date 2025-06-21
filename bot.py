@@ -339,11 +339,16 @@ def set_webhook():
         logger.error(f"Ошибка установки вебхука: {str(e)}")
 
 def run_bot():
-    """Запускаем бота в фоновом режиме"""
+    """Упрощенный запуск бота"""
     try:
+        logger.info("🤖 Запускаем бота...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        # Инициализируем приложение
+        loop.run_until_complete(telegram_app.initialize())
         loop.run_until_complete(telegram_app.start())
+        
         logger.info("🤖 Бот запущен и готов к работе!")
         loop.run_forever()
     except Exception as e:

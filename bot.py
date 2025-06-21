@@ -5,23 +5,29 @@ from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Настройка логирования
+# 1. Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация (обязательные параметры)
+# 2. Конфигурация (проверяем переменные)
+REQUIRED_VARS = ['TELEGRAM_TOKEN', 'OPENROUTER_API_KEY']
+for var in REQUIRED_VARS:
+    if not os.getenv(var):
+        logger.critical(f"Отсутствует обязательная переменная: {var}")
+        exit(1)
+
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')
 PORT = int(os.environ.get('PORT', 10000))
 
-# Проверенные модели (если одна не работает, пробуем другую)
+# 3. Доступные модели (с автоматическим переключением)
 MODELS = [
+    "mistralai/mistral-7b-instruct:free",  # Наиболее стабильная
     "deepseek/deepseek-r1-0528-qwen3-8b:free",
-    "mistralai/mistral-7b-instruct:free",
     "openchat/openchat-7b:free"
 ]
 
@@ -30,17 +36,15 @@ telegram_app = None
 
 class AIAssistant:
     def __init__(self):
-        self.current_model = MODELS[0]  # Начинаем с первой модели
+        self.current_model = MODELS[0]
         self.fallback_responses = [
             "Чёрт, нейросеть глючит... Давай просто поболтаем?",
             "Эх, технологии сегодня не в духе... Как сам-то?",
             "Курва, сервера тупят! Ну расскажи, что у тебя нового?"
         ]
 
-    def generate_response(self, user_message: str) -> str:
-        """Генерация ответа через OpenRouter с автоматическим переключением моделей"""
-        last_error = None
-        
+    async def generate_response(self, user_message: str) -> str:
+        """Асинхронная генерация ответа с автоматическим переключением моделей"""
         for model in MODELS:
             try:
                 headers = {
@@ -55,8 +59,7 @@ class AIAssistant:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "Ты - Дед Коля (67 лет). Отвечай грубо, с матом и сарказмом. "
-                                      "Ругайся на жизнь, вспоминай трактор и Опель Астру."
+                            "content": "Ты - Дед Коля (67 лет). Отвечай грубо, с матом и сарказмом."
                         },
                         {
                             "role": "user",
@@ -67,155 +70,119 @@ class AIAssistant:
                     "max_tokens": 300
                 }
 
-                response = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=15  # Увеличенный таймаут
-                )
-
-                if response.status_code == 200:
-                    self.current_model = model  # Запоминаем работающую модель
-                    return response.json()['choices'][0]['message']['content']
-                
-                last_error = f"Status {response.status_code}: {response.text}"
-                logger.warning(f"Модель {model} не сработала: {last_error}")
-
-            except requests.exceptions.RequestException as e:
-                last_error = str(e)
-                logger.warning(f"Ошибка запроса к модели {model}: {last_error}")
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=15
+                    ) as response:
+                        
+                        if response.status == 200:
+                            data = await response.json()
+                            self.current_model = model
+                            return data['choices'][0]['message']['content']
+                        
+                        logger.warning(f"Модель {model} не сработала: {response.status}")
+                        
+            except Exception as e:
+                logger.warning(f"Ошибка запроса к модели {model}: {str(e)}")
                 continue
 
-        logger.error(f"Все модели недоступны. Последняя ошибка: {last_error}")
         return self.fallback_responses[hash(user_message) % len(self.fallback_responses)]
 
-ai_assistant = AIAssistant()
+ai = AIAssistant()
 
-# Telegram обработчики
+# 4. Telegram обработчики (асинхронные)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"👴 Дед Коля на связи! Используем модель: {ai_assistant.current_model}\n"
-        "Шо надо, курва?"
-    )
+    await update.message.reply_text(f"👴 Дед Коля на связи! Используем модель: {ai.current_model}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        response = ai_assistant.generate_response(update.message.text)
+        response = await ai.generate_response(update.message.text)
         await update.message.reply_text(response)
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {str(e)}")
         await update.message.reply_text("Блядь, я сломался... Попробуй ещё раз!")
 
-def init_telegram():
+# 5. Инициализация Telegram (с правильным shutdown)
+async def init_telegram():
     global telegram_app
     if not telegram_app:
-        try:
-            telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-            telegram_app.add_handler(CommandHandler("start", start))
-            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-            logger.info("Telegram бот инициализирован")
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Telegram: {str(e)}")
-            raise
+        telegram_app = (
+            Application.builder()
+            .token(TELEGRAM_TOKEN)
+            .post_init(post_init)
+            .post_shutdown(post_shutdown)
+            .build()
+        )
+        
+        telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Flask роуты
+async def post_init(app: Application):
+    logger.info("Бот успешно инициализирован")
+    if WEBHOOK_URL:
+        await app.bot.set_webhook(f"{WEBHOOK_URL}/telegram_webhook")
+
+async def post_shutdown(app: Application):
+    logger.info("Бот корректно завершает работу")
+    await app.bot.delete_webhook()
+
+# 6. Flask роуты (синхронные)
 @app.route('/')
 def home():
     return jsonify({
         "status": "running",
-        "model": ai_assistant.current_model,
-        "telegram": bool(telegram_app)
+        "model": ai.current_model,
+        "webhook": bool(WEBHOOK_URL)
     })
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    try:
-        init_telegram()
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        telegram_app.bot.set_webhook(webhook_url)
-        return jsonify({
-            "status": "success",
-            "url": webhook_url,
-            "active_model": ai_assistant.current_model
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
 @app.route('/telegram_webhook', methods=['POST'])
-def telegram_webhook():
+async def telegram_webhook():
     try:
-        init_telegram()
-        update = Update.de_json(request.json, telegram_app.bot)
-        telegram_app.process_update(update)
+        await init_telegram()
+        update = Update.de_json(await request.json, telegram_app.bot)
+        await telegram_app.process_update(update)
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return jsonify({"status": "error"}), 500
 
-@app.route('/test_ai', methods=['GET'])
-def test_ai():
-    """Тестовый эндпоинт для проверки работы нейросети"""
-    try:
-        test_message = "Привет! Как дела?"
-        response = ai_assistant.generate_response(test_message)
-        
-        return jsonify({
-            "status": "success",
-            "request": test_message,
-            "response": response,
-            "model": ai_assistant.current_model,
-            "available_models": MODELS
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-            "models_tried": MODELS
-        }), 500
+# 7. Запуск приложения
+def run_app():
+    import asyncio
+    from threading import Thread
 
-def check_config():
-    """Проверка обязательных настроек"""
-    required_vars = {
-        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
-        'OPENROUTER_API_KEY': OPENROUTER_API_KEY
-    }
-    
-    missing = [name for name, val in required_vars.items() if not val]
-    if missing:
-        logger.error(f"Отсутствуют обязательные переменные: {', '.join(missing)}")
-        return False
-    
-    logger.info("="*50)
-    logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
-    logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
-    logger.info(f"WEBHOOK_URL: {WEBHOOK_URL or 'не установлен (будет использован polling)'}")
-    logger.info(f"Доступные модели: {MODELS}")
-    logger.info("="*50)
-    return True
+    # Запускаем Flask в отдельном потоке
+    def run_flask():
+        app.run(host='0.0.0.0', port=PORT)
+
+    Thread(target=run_flask).start()
+
+    # Запускаем Telegram бота
+    async def run_telegram():
+        await init_telegram()
+        if WEBHOOK_URL:
+            await telegram_app.start()
+            await telegram_app.updater.start_polling()  # Для обработки сообщений
+        else:
+            await telegram_app.run_polling()
+
+    asyncio.run(run_telegram())
 
 if __name__ == '__main__':
-    if not check_config():
-        exit(1)
+    logger.info("="*50)
+    logger.info(f"Запуск бота (WEBHOOK: {WEBHOOK_URL or 'POLLING'})")
+    logger.info(f"Доступные модели: {MODELS}")
+    logger.info("="*50)
 
     try:
-        init_telegram()
-        
-        if WEBHOOK_URL:
-            webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-            telegram_app.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                webhook_url=webhook_url,
-                drop_pending_updates=True
-            )
-            logger.info(f"🚀 Бот запущен в webhook режиме: {webhook_url}")
-        else:
-            telegram_app.run_polling(drop_pending_updates=True)
-            logger.info("🤖 Бот запущен в polling режиме")
-            
+        run_app()
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
     except Exception as e:
         logger.critical(f"Критическая ошибка: {str(e)}")
     finally:
         if telegram_app:
-            telegram_app.stop()
-            telegram_app.shutdown()
+            asyncio.run(telegram_app.shutdown())

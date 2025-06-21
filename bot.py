@@ -6,7 +6,6 @@ import sys
 import sqlite3
 import re
 import asyncio
-import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Update
@@ -273,8 +272,6 @@ def create_telegram_app():
     
     return application
 
-telegram_app = create_telegram_app()
-
 # ====================== FLASK РОУТЫ ======================
 @app.route('/')
 def home():
@@ -303,8 +300,14 @@ def test_ai():
 def telegram_webhook():
     try:
         logger.info("Получен вебхук от Telegram")
+        
+        # Создаем приложение Telegram при каждом запросе
+        telegram_app = create_telegram_app()
         update = Update.de_json(request.json, telegram_app.bot)
-        telegram_app.update_queue.put(update)
+        
+        # Обрабатываем обновление
+        telegram_app.process_update(update)
+        
         return '', 200
     except Exception as e:
         logger.error(f"Ошибка вебхука: {str(e)}")
@@ -322,46 +325,24 @@ def check_env():
         "RENDER_SERVICE_NAME": RENDER_SERVICE_NAME
     })
 
-async def set_webhook_task():
-    """Устанавливаем вебхук"""
-    webhook_url = f"https://{HOSTNAME}/telegram_webhook"
-    logger.info(f"Устанавливаем вебхук на: {webhook_url}")
-    await telegram_app.bot.set_webhook(webhook_url)
-    logger.info(f"✅ Вебхук успешно установлен")
-
 def set_webhook():
-    """Синхронная обертка для установки вебхука"""
+    """Синхронная установка вебхука"""
     try:
+        # Создаем временное приложение
+        telegram_app = create_telegram_app()
+        
+        # Устанавливаем вебхук
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(set_webhook_task())
+        webhook_url = f"https://{HOSTNAME}/telegram_webhook"
+        loop.run_until_complete(telegram_app.bot.set_webhook(webhook_url))
+        logger.info(f"✅ Вебхук успешно установлен: {webhook_url}")
     except Exception as e:
         logger.error(f"Ошибка установки вебхука: {str(e)}")
-
-def run_bot():
-    """Упрощенный запуск бота"""
-    try:
-        logger.info("🤖 Запускаем бота...")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Инициализируем приложение
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.start())
-        
-        logger.info("🤖 Бот запущен и готов к работе!")
-        loop.run_forever()
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {str(e)}")
 
 if __name__ == '__main__':
     # Устанавливаем вебхук
     set_webhook()
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
     
     # Запускаем Flask
     logger.info(f"🌐 Запускаем сервер на порту {PORT}")

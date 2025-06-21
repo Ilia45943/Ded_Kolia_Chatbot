@@ -148,4 +148,230 @@ class DedKolia:
             
         try:
             history = self.get_history(user_id)
-            context = "\n".join(f"User: {msg[0]}\nBot: {msg[1
+            context = "\n".join(f"User: {msg[0]}\nBot: {msg[1]}" for msg in history) if history else "Нет истории"
+            
+            user_facts = []
+            with get_db_connection() as conn:
+                cursor = conn.execute("SELECT fact, value FROM user_facts WHERE user_id = ?", (user_id,))
+                user_facts = cursor.fetchall()
+            
+            facts = "\n".join(f"{fact[0]}: {fact[1]}" for fact in user_facts) or "Ничего не известно"
+            
+            system_prompt = f"""Ты — Дед Коля (67 лет). Отвечай как матерый старик:
+            - Ругайся: курва, ебать в рот, блядь
+            - Добавляй сарказм и чёрный юмор
+            - Упоминай свой трактор и Опель Астру
+            
+            Факты о собеседнике:
+            {facts}
+            
+            История диалога:
+            {context}"""
+            
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": WEBHOOK_URL or "https://ded-kolia-bot.com",
+                    "X-Title": "Дед Коля Бот"
+                },
+                json={
+                    "model": MODEL_NAME,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message}
+                    ],
+                    "temperature": 0.85,
+                    "max_tokens": 350
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return response.json()['choices'][0]['message']['content']
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Нейросеть недоступна: {str(e)}")
+            return None
+
+# Инициализация систем
+ded_kolia = DedKolia()
+
+# ====================== TELEGRAM ОБРАБОТЧИКИ ======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text(f"👴 Дед Коля на связи! Используем модель: {MODEL_NAME}\nШо надо?")
+    except Exception as e:
+        logger.error(f"Ошибка в команде /start: {str(e)}")
+
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = str(update.message.from_user.id)
+        if not context.args:
+            await update.message.reply_text("Чё запоминать-то? Используй: /remember я люблю пиво")
+            return
+        
+        fact_text = " ".join(context.args)
+        with get_db_connection() as conn:
+            conn.execute("""
+                INSERT INTO user_facts (user_id, fact, value, timestamp)
+                VALUES (?, 'факт', ?, ?)
+            """, (user_id, fact_text, datetime.now().isoformat()))
+        await update.message.reply_text(f"✅ Окей, курва, запомнил: {fact_text}")
+    except Exception as e:
+        logger.error(f"Ошибка в команде /remember: {str(e)}")
+        await update.message.reply_text("Блядь, не запомнилось... Давай ещё раз?")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = str(update.message.from_user.id)
+        user_input = update.message.text
+        
+        response = ded_kolia.generate_response(user_id, user_input)
+        ded_kolia.save_interaction(user_id, user_input, response)
+        
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Ошибка обработки сообщения: {str(e)}")
+        await update.message.reply_text("Ой, курва, я сломался... Попробуй ещё раз!")
+
+# ====================== ИНИЦИАЛИЗАЦИЯ TELEGRAM ======================
+def init_telegram():
+    global telegram_app
+    if telegram_app is None:
+        try:
+            telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+            telegram_app.add_handler(CommandHandler("start", start))
+            telegram_app.add_handler(CommandHandler("remember", remember_command))
+            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            
+            # Инициализация в цикле событий
+            loop.run_until_complete(telegram_app.initialize())
+            loop.run_until_complete(telegram_app.start())
+            
+            logger.info("Telegram бот инициализирован")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации Telegram: {str(e)}")
+            raise
+
+# ====================== FLASK РОУТЫ ======================
+@app.route('/')
+def home():
+    return f"🤖 Дед Коля в работе! Модель: {MODEL_NAME}"
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    try:
+        if not WEBHOOK_URL:
+            return jsonify({"status": "error", "message": "WEBHOOK_URL не настроен"}), 400
+        
+        init_telegram()
+        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+        
+        loop.run_until_complete(telegram_app.bot.set_webhook(webhook_url))
+        logger.info(f"Вебхук установлен: {webhook_url}")
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Вебхук установлен: {webhook_url}",
+            "bot_info": {
+                "username": telegram_app.bot.username,
+                "id": telegram_app.bot.id
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    try:
+        if telegram_app is None:
+            init_telegram()
+        
+        update = Update.de_json(request.json, telegram_app.bot)
+        loop.run_until_complete(telegram_app.process_update(update))
+        return '', 200
+    except Exception as e:
+        logger.error(f"Ошибка обработки вебхука: {str(e)}")
+        return jsonify({"status": "error"}), 500
+
+@app.route('/test', methods=['GET'])
+def test():
+    try:
+        test_cases = [
+            ("Привет", "приветствие"),
+            ("Как меня зовут?", "факты"),
+            ("Что ты помнишь?", "история")
+        ]
+        
+        results = []
+        test_user = "test_user"
+        
+        for message, test_type in test_cases:
+            response = ded_kolia.generate_response(test_user, message)
+            results.append({
+                "test": test_type,
+                "message": message,
+                "response": response
+            })
+        
+        return jsonify({
+            "status": "success",
+            "database": "работает",
+            "ai_available": bool(OPENROUTER_API_KEY),
+            "tests": results
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+# ====================== ЗАПУСК ======================
+def check_env_vars():
+    required = [
+        ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+        ('WEBHOOK_URL', WEBHOOK_URL)
+    ]
+    
+    missing = [name for name, val in required if not val]
+    if missing:
+        logger.error(f"Отсутствуют обязательные переменные: {', '.join(missing)}")
+        return False
+    
+    logger.info("="*50)
+    logger.info(f"TELEGRAM_TOKEN: {'установлен' if TELEGRAM_TOKEN else 'отсутствует'}")
+    logger.info(f"OPENROUTER_API_KEY: {'установлен' if OPENROUTER_API_KEY else 'отсутствует'}")
+    logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
+    logger.info(f"PORT: {PORT}")
+    logger.info(f"МОДЕЛЬ: {MODEL_NAME}")
+    logger.info("="*50)
+    return True
+
+if __name__ == '__main__':
+    if not check_env_vars():
+        exit(1)
+    
+    try:
+        init_telegram()
+        
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
+            loop.run_until_complete(telegram_app.bot.set_webhook(webhook_url))
+            logger.info(f"🚀 Вебхук установлен: {webhook_url}")
+        
+        logger.info(f"🤖 Запускаем сервер на порту {PORT}...")
+        app.run(host='0.0.0.0', port=PORT)
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {str(e)}")
+    finally:
+        if telegram_app:
+            loop.run_until_complete(telegram_app.stop())
+            loop.run_until_complete(telegram_app.shutdown())
+        loop.close()

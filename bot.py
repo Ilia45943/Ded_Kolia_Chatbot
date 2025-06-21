@@ -1,16 +1,15 @@
 import os
 import logging
 import requests
-import asyncio
-from threading import Thread
-from flask import Flask, request, jsonify
-from telegram import Update
+from flask import Flask, request
+from telegram import Update, Bot
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    Dispatcher
 )
 
 # Настройка логирования
@@ -29,14 +28,15 @@ for var in REQUIRED_VARS:
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').rstrip('/')
 PORT = int(os.environ.get('PORT', 10000))
 
 # Используем стабильную модель
 MODEL_NAME = "mistralai/mistral-7b-instruct:free"
 
 app = Flask(__name__)
-telegram_app = None
+
+# Создаем бота Telegram
+bot = Bot(token=TELEGRAM_TOKEN)
 
 class AIAssistant:
     def __init__(self):
@@ -49,14 +49,9 @@ class AIAssistant:
     def generate_response(self, user_message):
         """Простой и надежный способ генерации ответа"""
         try:
-            if not OPENROUTER_API_KEY:
-                raise ValueError("API ключ отсутствует")
-            
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": WEBHOOK_URL or "https://ai-bot.com",
-                "X-Title": "Дед Коля Бот"
+                "Content-Type": "application/json"
             }
 
             payload = {
@@ -106,95 +101,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки сообщения: {str(e)}")
         await update.message.reply_text("Блядь, я сломался... Попробуй ещё раз!")
 
-def init_telegram():
-    """Инициализация Telegram приложения"""
-    global telegram_app
-    if not telegram_app:
-        try:
-            telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-            telegram_app.add_handler(CommandHandler("start", start))
-            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-            logger.info("Telegram бот инициализирован")
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Telegram: {str(e)}")
-            raise
+# Инициализация диспетчера
+def setup_dispatcher():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Инициализируем диспетчер
+    dispatcher = Dispatcher(application.bot, None, application=application)
+    return dispatcher
+
+# Создаем диспетчер
+dispatcher = setup_dispatcher()
 
 # Flask роуты
 @app.route('/')
 def home():
     return "🤖 Дед Коля в работе!"
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    try:
-        init_telegram()
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        telegram_app.bot.set_webhook(webhook_url)
-        return jsonify({
-            "status": "success",
-            "url": webhook_url
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/telegram_webhook', methods=['POST'])
-def telegram_webhook():
-    try:
-        init_telegram()
-        update = Update.de_json(request.json, telegram_app.bot)
-        telegram_app.process_update(update)
-        return '', 200
-    except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        return jsonify({"status": "error"}), 500
-
 @app.route('/test_ai')
 def test_ai():
     try:
         test_message = "Привет! Как дела?"
         response = ai_assistant.generate_response(test_message)
-        return jsonify({
+        return {
             "status": "success",
             "request": test_message,
             "response": response
-        })
+        }
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return {"status": "error", "message": str(e)}, 500
 
-def run_flask():
-    """Запуск Flask в основном потоке"""
-    app.run(host='0.0.0.0', port=PORT)
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    try:
+        # Обрабатываем входящее обновление
+        update = Update.de_json(request.json, bot)
+        dispatcher.process_update(update)
+        return '', 200
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return {"status": "error"}, 500
 
-def run_telegram():
-    """Запуск Telegram бота в отдельном потоке"""
-    init_telegram()
-    
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/telegram_webhook"
-        telegram_app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=webhook_url,
-            drop_pending_updates=True
-        )
-        logger.info(f"🚀 Бот запущен в webhook режиме: {webhook_url}")
-    else:
-        telegram_app.run_polling(drop_pending_updates=True)
-        logger.info("🤖 Бот запущен в polling режиме")
+def set_webhook():
+    """Устанавливаем вебхук"""
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/telegram_webhook"
+    bot.set_webhook(webhook_url)
+    logger.info(f"Вебхук установлен: {webhook_url}")
 
 if __name__ == '__main__':
-    logger.info("="*50)
-    logger.info(f"Запуск бота (WEBHOOK: {WEBHOOK_URL or 'POLLING'})")
-    logger.info(f"Используемая модель: {MODEL_NAME}")
-    logger.info("="*50)
-
-    # Запускаем Telegram бота в отдельном потоке
-    telegram_thread = Thread(target=run_telegram)
-    telegram_thread.daemon = True
-    telegram_thread.start()
-
-    # Запускаем Flask в основном потоке
-    try:
-        run_flask()
-    except Exception as e:
-        logger.critical(f"Критическая ошибка Flask: {str(e)}")
+    # Устанавливаем вебхук
+    set_webhook()
+    
+    # Запускаем Flask
+    logger.info(f"🤖 Бот запущен на порту {PORT}")
+    app.run(host='0.0.0.0', port=PORT)

@@ -1,7 +1,8 @@
 import os
 import logging
 import requests
-from flask import Flask, request
+import json
+from flask import Flask, request, jsonify
 from telegram import Update, Bot
 from telegram.ext import (
     Application,
@@ -12,12 +13,19 @@ from telegram.ext import (
     Dispatcher
 )
 
-# Настройка логирования
+# Явно устанавливаем кодировку UTF-8
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+# Настройка логирования с UTF-8
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Проверка обязательных переменных
 REQUIRED_VARS = ['TELEGRAM_TOKEN', 'OPENROUTER_API_KEY']
@@ -47,11 +55,11 @@ class AIAssistant:
         ]
 
     def generate_response(self, user_message):
-        """Простой и надежный способ генерации ответа"""
+        """Генерация ответа с обработкой кодировки"""
         try:
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json; charset=utf-8"
             }
 
             payload = {
@@ -70,15 +78,18 @@ class AIAssistant:
                 "max_tokens": 300
             }
 
+            # Используем явное указание кодировки
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
-                json=payload,
+                data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
                 timeout=10
             )
 
             if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
+                # Обработка ответа с явным указанием кодировки
+                content = response.json()['choices'][0]['message']['content']
+                return content.encode('utf-8').decode('utf-8')
             else:
                 logger.error(f"Ошибка API: {response.status_code} - {response.text}")
                 return self.default_responses[0]
@@ -111,10 +122,10 @@ def setup_dispatcher():
     
     # Инициализируем диспетчер
     dispatcher = Dispatcher(application.bot, None, application=application)
-    return dispatcher
+    return dispatcher, application
 
-# Создаем диспетчер
-dispatcher = setup_dispatcher()
+# Создаем диспетчер и приложение
+dispatcher, application = setup_dispatcher()
 
 # Flask роуты
 @app.route('/')
@@ -126,13 +137,22 @@ def test_ai():
     try:
         test_message = "Привет! Как дела?"
         response = ai_assistant.generate_response(test_message)
-        return {
+        
+        # Формируем ответ с явным указанием кодировки
+        resp = jsonify({
             "status": "success",
             "request": test_message,
             "response": response
-        }
+        })
+        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return resp
     except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+        error_resp = jsonify({
+            "status": "error",
+            "message": str(e)
+        })
+        error_resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return error_resp, 500
 
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
@@ -143,7 +163,7 @@ def telegram_webhook():
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
-        return {"status": "error"}, 500
+        return jsonify({"status": "error"}), 500
 
 def set_webhook():
     """Устанавливаем вебхук"""
@@ -151,10 +171,25 @@ def set_webhook():
     bot.set_webhook(webhook_url)
     logger.info(f"Вебхук установлен: {webhook_url}")
 
+def start_bot():
+    """Запускаем бота в отдельном потоке"""
+    try:
+        # Устанавливаем вебхук
+        set_webhook()
+        
+        # Запускаем обработку обновлений
+        application.run_polling()
+        logger.info("🤖 Бот запущен и готов к работе!")
+    except Exception as e:
+        logger.critical(f"Ошибка запуска бота: {str(e)}")
+
 if __name__ == '__main__':
-    # Устанавливаем вебхук
-    set_webhook()
+    # Запускаем бота в отдельном потоке
+    import threading
+    bot_thread = threading.Thread(target=start_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
     
     # Запускаем Flask
-    logger.info(f"🤖 Бот запущен на порту {PORT}")
+    logger.info(f"🌐 Запускаем Flask на порту {PORT}")
     app.run(host='0.0.0.0', port=PORT)
